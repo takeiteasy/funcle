@@ -1,12 +1,12 @@
-(in-package :beast)
+(in-package :funcle)
 
 
 ;;;; Notes
 ;;; Entities are stored in an {id -> entity} hash table.
 ;;;
-;;; Entities are also indexed by aspect in a nested hash table:
+;;; Entities are also indexed by trait in a nested hash table:
 ;;;
-;;;     {aspect-symbol -> {id -> entity}}
+;;;     {trait-symbol -> {id -> entity}}
 ;;;
 ;;; Entities are indexed by system too, as a vector of hash tables, one entry
 ;;; for each of the system's arguments:
@@ -22,14 +22,21 @@
 ;;;
 ;;; TODO: Figure out the distinct problem.
 
-
 ;;;; Global Data Structures ---------------------------------------------------
-(defvar *entity-id-counter* 0)
-(defvar *entity-index* (make-hash-table))
-(defvar *aspect-index* (make-hash-table))
+(defvar *trait-index* (make-hash-table))
 (defvar *system-index* (make-hash-table))
 (defvar *systems* (make-hash-table))
 
+(defclass world ()
+    ((entity-id-counter :initform 1
+                        :accessor next-entity-id)
+     (entity-index :initform (make-hash-table)
+                   :accessor entities)
+     (system-index :initform (make-hash-table)
+                   :accessor system-index)))
+
+(defvar *default-world* (make-instance 'world))
+(defvar *world* *default-world*)
 
 ;;;; Utils --------------------------------------------------------------------
 (defun symb (&rest args)
@@ -38,14 +45,12 @@
 
 ;;;; Entities -----------------------------------------------------------------
 (defclass entity ()
-  ((id
-     :reader entity-id :initform (incf *entity-id-counter*)
-     :documentation
-     "The unique ID of the entity.  This may go away in the future.")
-   (%beast/aspects
-     :allocation :class :initform nil
-     :documentation
-     "A list of the aspects this entity class inherits.  **Don't touch this.**"))
+    ((id :reader entity-id :initform (incf-id-counter *world*)
+         :documentation
+         "The unique ID of the entity.  This may go away in the future.")
+     (%beast/traits :allocation :class :initform nil
+                    :documentation
+                    "A list of the traits this entity class inherits.  **Don't touch this.**"))
   (:documentation "A single entity in the game world."))
 
 (defmethod print-object ((e entity) stream)
@@ -54,54 +59,52 @@
 
 
 (defun entity-satisfies-system-type-specifier-p (entity specifier)
-  (every (lambda (aspect) (typep entity aspect))
-         specifier))
+  (every (lambda (trait) (typep entity trait))
+      specifier))
 
 (defun index-entity (entity)
   "Insert `entity` into the entity index."
-  (setf (gethash (entity-id entity) *entity-index*) entity))
+  (setf (gethash (entity-id entity) (entities *world*)) entity))
 
-(defun index-entity-aspects (entity)
-  "Insert `entity` into appropriate aspect indexes."
-  (loop :for aspect :in (slot-value entity '%beast/aspects)
+(defun index-entity-traits (entity)
+  "Insert `entity` into appropriate trait indexes."
+  (loop :for trait :in (slot-value entity '%beast/traits)
         :do (setf (gethash (entity-id entity)
-                           (gethash aspect *aspect-index*))
-                  entity)))
+                           (gethash trait *trait-index*))
+              entity)))
 
 (defun index-entity-systems (entity)
   "Insert `entity` into appropriate system indexes."
   (loop
-    :with id = (entity-id entity)
-    :for system :being :the hash-keys :of *systems*
-    :using (hash-value (nil nil type-specifiers))
-    :do (loop :for argument-index :across (gethash system *system-index*)
-              :for specifier :in type-specifiers
-              :when (entity-satisfies-system-type-specifier-p entity specifier)
-              :do (setf (gethash id argument-index) entity))))
+ :with id = (entity-id entity)
+ :for system :being :the hash-keys :of *systems*
+ :using (hash-value (nil nil type-specifiers))
+ :do (loop :for argument-index :across (gethash system *system-index*)
+           :for specifier :in type-specifiers
+             :when (entity-satisfies-system-type-specifier-p entity specifier)
+           :do (setf (gethash id argument-index) entity))))
 
 
 (defun unindex-entity (id)
   "Remove `entity` from the entity-level index."
-  (remhash id *entity-index*))
+  (remhash id (entities *world*)))
 
-(defun unindex-entity-aspects (id)
-  "Remove `entity` from the aspect indexes."
-  (loop
-    :for index :being :the :hash-values :of *aspect-index*
-    :do (remhash id index)))
+(defun unindex-entity-traits (id)
+  "Remove `entity` from the trait indexes."
+  (loop :for index :being :the :hash-values :of *trait-index*
+        :do (remhash id index)))
 
 (defun unindex-entity-systems (id)
   "Remove `entity` from the system indexes."
-  (loop
-    :for argument-indexes :being :the hash-values :of *system-index*
-    :do (loop :for index :across argument-indexes
-              :do (remhash id index))))
+  (loop :for argument-indexes :being :the hash-values :of *system-index*
+        :do (loop :for index :across argument-indexes
+                  :do (remhash id index))))
 
 
 (defgeneric entity-created (entity)
   (:method ((entity entity)) nil)
   (:documentation
-  "Called after an entity has been created and indexed.
+   "Called after an entity has been created and indexed.
 
   The default method does nothing, but users can implement their own auxillary
   methods to run code when entities are created.
@@ -111,7 +114,7 @@
 (defgeneric entity-destroyed (entity)
   (:method ((entity entity)) nil)
   (:documentation
-  "Called after an entity has been destroyed and unindexed.
+   "Called after an entity has been destroyed and unindexed.
 
   The default method does nothing, but users can implement their own auxillary
   methods to run code when entities are destroyed.
@@ -130,7 +133,7 @@
   "
   (let ((entity (apply #'make-instance class initargs)))
     (index-entity entity)
-    (index-entity-aspects entity)
+    (index-entity-traits entity)
     (index-entity-systems entity)
     (entity-created entity)
     entity))
@@ -144,7 +147,7 @@
   "
   (let ((id (entity-id entity)))
     (unindex-entity id)
-    (unindex-entity-aspects id)
+    (unindex-entity-traits id)
     (unindex-entity-systems id))
   (entity-destroyed entity)
   entity)
@@ -164,7 +167,7 @@
 
 (defun get-entity (id)
   "Return the entity with the given `id`, or `nil` if it is unknown."
-  (gethash id *entity-index*))
+  (gethash id (entities *world*)))
 
 (defun all-entities ()
   "Return a list of all entities.
@@ -173,7 +176,8 @@
   be handy for debugging purposes.
 
   "
-  (loop :for entity :being :the :hash-values :of *entity-index* :collect entity))
+  (loop :for entity :being :the :hash-values :of (entities *world*)
+        :collect entity))
 
 (defun map-entities (function &optional (type 'entity))
   "Map `function` over all entities that are subtypes of `type`.
@@ -182,17 +186,17 @@
   be handy for debugging purposes.
 
   "
-  (loop :for entity :being :the :hash-values :of *entity-index*
-        :when (typep entity type)
+  (loop :for entity :being :the :hash-values :of (entities *world*)
+          :when (typep entity type)
         :collect (funcall function entity)))
 
 
-(defmacro define-entity (name aspects &rest slots)
+(defmacro define-entity (name traits &rest slots)
   "Define an entity class.
 
   `name` should be a symbol that will become the name of the class.
 
-  `aspects` should be a list of the aspects this entity should inherit from.
+  `traits` should be a list of the traits this entity should inherit from.
 
   `slots` can be zero or more extra CLOS slot definitions.
 
@@ -205,8 +209,8 @@
 
   "
   `(progn
-    (defclass ,name (entity ,@aspects)
-      ((%beast/aspects :allocation :class :initform ',aspects)
+    (defclass ,name (entity ,@traits)
+      ((%beast/traits :allocation :class :initform ',traits)
        ,@slots))
     (defun ,(symb name '?) (object)
       (typep object ',name))
@@ -214,12 +218,12 @@
 
 
 ;;;; Aspects ------------------------------------------------------------------
-(defun initialize-aspect-index (name)
-  (when (not (gethash name *aspect-index*))
-    (setf (gethash name *aspect-index*) (make-hash-table))))
+(defun initialize-trait-index (name)
+  (when (not (gethash name *trait-index*))
+        (setf (gethash name *trait-index*) (make-hash-table))))
 
-(defmacro define-aspect (name &rest fields)
-  "Define an aspect class.
+(defmacro define-trait (name &rest fields)
+  "Define an trait class.
 
   `name` should be a symbol that will become the name of the class.
 
@@ -227,13 +231,13 @@
   be a symbol (the field name), or a list of the field name and extra CLOS slot
   options.
 
-  Field names will have the aspect name and a slash prepended to them to create
+  Field names will have the trait name and a slash prepended to them to create
   the slot names.  `:initarg` and `:accessor` slot options will also be
   automatically generated.
 
   Example:
 
-    (define-aspect edible
+    (define-trait edible
       energy
       (taste :initform nil))
     =>
@@ -246,45 +250,43 @@
 
   "
   (flet ((clean-field (f)
-           (ctypecase f
-             (symbol (list f))
-             (list f))))
+                      (ctypecase f
+                        (symbol (list f))
+                        (list f))))
     `(progn
       (defclass ,name ()
-        ,(loop
-           :for (field . field-options) :in (mapcar #'clean-field fields)
-           :for field-name = (symb name '/ field)
-           :collect `(,field-name
-                      :accessor ,field-name
-                      :initarg ,(intern (string field-name) :keyword)
-                      ,@field-options)))
+        ,(loop :for (field . field-options) :in (mapcar #'clean-field fields)
+               :for field-name = (symb name '/ field)
+               :collect `(,field-name
+                           :accessor ,field-name
+                           :initarg ,(intern (string field-name) :keyword)
+                           ,@field-options)))
 
       (defun ,(symb name '?) (object)
         (typep object ',name))
 
-      (initialize-aspect-index ',name)
+      (initialize-trait-index ',name)
 
       (find-class ',name))))
 
 
 ;;;; Systems ------------------------------------------------------------------
 (defun rebuild-system-index (arglist)
-  (coerce (loop
-            :for (nil . type-specifier) :in arglist
-            :for index = (make-hash-table)
-            :do (loop
-                  :for entity :being :the :hash-values :of *entity-index*
-                  :when (entity-satisfies-system-type-specifier-p entity type-specifier)
-                  :do (setf (gethash (entity-id entity) index) entity))
-            :collect index)
+  (coerce (loop :for (nil . type-specifier) :in arglist
+                :for index = (make-hash-table)
+                :do (loop
+                   :for entity :being :the :hash-values :of (entities *world*)
+                     :when (entity-satisfies-system-type-specifier-p entity type-specifier)
+                   :do (setf (gethash (entity-id entity) index) entity))
+                :collect index)
           'vector))
 
 (defun initialize-system-index (name function arglist)
   (setf (gethash name *systems*)
-        (list function (length arglist) (mapcar #'cdr arglist))
+    (list function (length arglist) (mapcar #'cdr arglist))
 
-        (gethash name *system-index*)
-        (rebuild-system-index arglist)))
+    (gethash name *system-index*)
+    (rebuild-system-index arglist)))
 
 
 (defun build-system-runner (name type-specifiers)
@@ -293,12 +295,11 @@
           (arguments (loop :repeat (length type-specifiers) :collect (gensym "E"))))
       `(let ((,argument-indexes (gethash ',name *system-index*)))
          ,(labels ((recur (types args n)
-                     (if (null types)
-                       `(,name ,@arguments)
-                       `(loop
-                          :for ,(first args) :of-type ,(first types)
-                          :being :the :hash-values :of (aref ,argument-indexes ,n)
-                          :do ,(recur (rest types) (rest args) (1+ n))))))
+                          (if (null types)
+                              `(,name ,@arguments)
+                              `(loop :for ,(first args) :of-type ,(first types)
+                                     :being :the :hash-values :of (aref ,argument-indexes ,n)
+                                     :do ,(recur (rest types) (rest args) (1+ n))))))
             (recur type-specifiers arguments 0))))))
 
 
@@ -309,7 +310,7 @@
   system options.  A bare symbol can be used if no options are needed.
 
   `arglist` should be a list of system arguments.  Each argument should be
-  a list of the argument name and zero or more aspect/entity classes.
+  a list of the argument name and zero or more trait/entity classes.
 
   Defining a system `foo` defines two functions:
 
@@ -332,9 +333,9 @@
 
   "
   (let ((argument-type-specifiers
-          (loop :for arg :in arglist ; either foo or (foo a1 a2)
-                :for classes = (if (listp arg) (rest arg) nil)
-                :collect `(and entity ,@classes))))
+         (loop :for arg :in arglist ; either foo or (foo a1 a2)
+               :for classes = (if (listp arg) (rest arg) nil)
+               :collect `(and entity ,@classes))))
     (destructuring-bind (name &key inline) (if (listp name-and-options)
                                                name-and-options
                                                (list name-and-options))
@@ -342,9 +343,9 @@
         (declaim (ftype (function (,@argument-type-specifiers)
                                   (values null &optional))
                         ,name)
-                 ,(if inline
-                    `(inline ,name)
-                    `(notinline ,name)))
+          ,(if inline
+               `(inline ,name)
+               `(notinline ,name)))
         (defun ,name (,@(mapcar #'car arglist))
           ,@body
           nil)
@@ -356,3 +357,52 @@
 
         ',name))))
 
+(defun make-world ()
+  (let ((w (make-instance 'world)))
+    (maphash (lambda (k v)
+               (declare (ignore v))
+               (setf
+                 (gethash k (system-index w))
+                 (make-hash-table)))
+             *system-index*)
+    w))
+
+(defmacro copy-hash-table (from to)
+  `(maphash (lambda (k v)
+              (setf (gethash k ,to) v))
+            ,from))
+
+(defmethod set-current-world ((w world))
+  (copy-hash-table *system-index* (system-index *world*))
+  (setf *world* w)
+  (copy-hash-table (system-index *world*) *system-index*))
+
+(defun set-default-world ()
+  (set-current-world *default-world*))
+
+(defmethod incf-id-counter ((w world))
+  (incf (next-entity-id w)))
+
+(define-trait location x y)
+
+(define-entity fella (location))
+
+(define-system move-fella ((entity location))
+  (incf (location/x entity))
+  (incf (location/y entity)))
+
+(let ((keys (loop :for key :being :the :hash-keys :of *system-index*
+                  :collect key))
+      (ent (create-entity 'fella)))
+  (declare (ignore ent))
+  (print keys))
+
+(let ((new-world (make-world)))
+  (print *world*)
+  (print (all-entities))
+  (set-current-world new-world)
+  (print *world*)
+  (print (all-entities))
+  (set-default-world)
+  (print *world*)
+  (print (all-entities)))

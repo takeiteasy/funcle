@@ -1,6 +1,11 @@
-(defpackage :beast
+(defpackage :funcle
   (:use :cl)
   (:export
+  :world
+   :make-world
+   :set-current-world
+   :set-default-world
+
     :entity
     :entity-id
 
