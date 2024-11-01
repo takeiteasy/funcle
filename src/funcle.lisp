@@ -1,5 +1,21 @@
-(in-package :funcle)
+; funcle.lisp
 
+; Copyright (C) 2024  George Watson
+
+; This program is free software: you can redistribute it and/or modify
+; it under the terms of the GNU General Public License as published by
+; the Free Software Foundation, either version 3 of the License, or
+; (at your option) any later version.
+
+; This program is distributed in the hope that it will be useful,
+; but WITHOUT ANY WARRANTY; without even the implied warranty of
+; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+; GNU General Public License for more details.
+
+; You should have received a copy of the GNU General Public License
+; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+(in-package :funcle)
 
 ;;;; Notes
 ;;; Entities are stored in an {id -> entity} hash table.
@@ -75,14 +91,13 @@
 
 (defun index-entity-systems (entity)
   "Insert `entity` into appropriate system indexes."
-  (loop
- :with id = (entity-id entity)
- :for system :being :the hash-keys :of *systems*
- :using (hash-value (nil nil type-specifiers))
- :do (loop :for argument-index :across (gethash system *system-index*)
-           :for specifier :in type-specifiers
-             :when (entity-satisfies-system-type-specifier-p entity specifier)
-           :do (setf (gethash id argument-index) entity))))
+  (loop :with id = (entity-id entity)
+        :for system :being :the hash-keys :of *systems*
+        :using (hash-value (nil nil type-specifiers))
+        :do (loop :for argument-index :across (gethash system *system-index*)
+                  :for specifier :in type-specifiers
+                    :when (entity-satisfies-system-type-specifier-p entity specifier)
+                  :do (setf (gethash id argument-index) entity))))
 
 
 (defun unindex-entity (id)
@@ -122,7 +137,7 @@
   "))
 
 
-(defun create-entity (class &rest initargs)
+(defun make-entity (class &rest initargs)
   "Create an entity of the given entity class and return it.
 
   `initargs` will be passed along to `make-instance`.
@@ -383,26 +398,129 @@
 (defmethod incf-id-counter ((w world))
   (incf (next-entity-id w)))
 
-(define-trait location x y)
+(defclass scene ()
+    ((name :reader scene-name
+           :initarg :name)
+     (initialized :reader scene-initialized?
+                  :accessor scene-initialized
+                  :initform nil)
+     (world :accessor scene-world
+            :initform nil)
+     (callbacks :initform (make-hash-table)
+                :initarg :callbacks
+                :accessor scene-callbacks)))
 
-(define-entity fella (location))
+(defmacro make-scene (name &body callback-forms)
+  `(make-instance 'scene
+     :name ,name
+     :callbacks (alexandria:plist-hash-table
+                  (list ,@(loop :for (key fn) :in callback-forms
+                                :collect key
+                                :collect fn)))))
 
-(define-system move-fella ((entity location))
-  (incf (location/x entity))
-  (incf (location/y entity)))
+(defmacro define-scene (name &rest args)
+  (let ((scene-name (format nil "~A" (symbol-name name))))
+    `(funcle::register-scene ,scene-name (make-scene ,scene-name ,@args))))
 
-(let ((keys (loop :for key :being :the :hash-keys :of *system-index*
-                  :collect key))
-      (ent (create-entity 'fella)))
-  (declare (ignore ent))
-  (print keys))
+(defmethod scene-> ((s scene) callback-key &rest args)
+  (let ((cb (gethash callback-key (scene-callbacks s))))
+    (when cb
+          (apply cb args))))
 
-(let ((new-world (make-world)))
-  (print *world*)
-  (print (all-entities))
-  (set-current-world new-world)
-  (print *world*)
-  (print (all-entities))
-  (set-default-world)
-  (print *world*)
-  (print (all-entities)))
+(defvar *scenes* (make-hash-table :test 'equal))
+(defvar *scene-history* nil)
+(defvar *current-scene* nil)
+
+(defun current-scene ()
+  (gethash *current-scene* *scenes*))
+
+(defun register-scene (name obj)
+  (let ((n (coerce name 'simple-base-string)))
+    (assert n)
+    (when (nth-value 1 (gethash n *scenes*))
+          (remhash n *scenes*))
+    (setf (gethash name *scenes*) obj)))
+
+(defun find-scene (obj)
+  (gethash (cond
+            ((stringp obj) (string-upcase (coerce obj 'simple-base-string)))
+            ((and (typep obj 'standard-object) (typep obj 'scene)) (scene-name obj))
+            (t nil))
+           *scenes*))
+
+(defun push-scene (obj)
+  (let ((scene-obj (find-scene obj)))
+    (when (and scene-obj
+               (not (string= *current-scene* (scene-name scene-obj))))
+          (when *current-scene*
+                (scene-> (current-scene) :leaving)
+                (setf *scene-history* (cons *current-scene* *scene-history*)))
+          (if (member (scene-name scene-obj) *scene-history* :test #'string=)
+              (loop :until (string= *current-scene* (scene-name scene-obj))
+                    :do (drop-scene))
+              (setf *current-scene* (scene-name scene-obj)))
+          (if (scene-initialized? scene-obj)
+              (progn
+               (set-current-world (scene-world scene-obj))
+               (scene-> scene-obj :resume))
+              (progn
+               (setf (scene-world scene-obj) (make-world))
+               (set-current-world (scene-world scene-obj))
+               (scene-> scene-obj :initialized))))))
+
+(defun drop-scene (&optional n)
+  (when *scene-history*
+        (let ((current-scene (current-scene)))
+          (scene-> current-scene :exiting)
+          (setf
+            *current-scene* (car *scene-history*)
+            *scene-history* (cdr *scene-history*))
+          (scene-> (current-scene) :resume)
+          (when (and n (> n 0))
+                (drop-scene (- n 1))))))
+
+(defun call-exit-callback (key value)
+  (declare (ignore key))
+  (scene-> value :exiting)
+  (setf (scene-initialized value) nil))
+
+(defun set-scene (obj &key skip-exiting-callback)
+  (when (null skip-exiting-callback)
+        (maphash #'call-exit-callback *scenes*))
+  (setf
+    *scene-history* nil
+    *current-scene* nil)
+  (push-scene obj))
+
+(defmacro define-game (&key
+                       (window-width 800)
+                       (window-height 600)
+                       (window-title "funcle")
+                       (clear-color :black)
+                       initial-scene
+                       target-fps
+                       initialized
+                       update
+                       exiting)
+  `(rl:with-window (,window-width ,window-height ,window-title)
+     (when ,target-fps
+           (rl:set-target-fps ,target-fps))
+     (unwind-protect
+         (progn
+          (when ,initialized
+                (funcall ,initialized))
+          (when ,initial-scene
+                (set-scene ,initial-scene))
+          (loop until (rl:window-should-close)
+                do (rl:with-drawing
+                     (rl:clear-background ,clear-color)
+                     (let ((delta-time (if (null ,target-fps)
+                                           (/ (rl:get-frame-time) 1000.0) ;; delta time in milliseconds
+                                           (/ 1.0 (coerce ,target-fps 'float)))))
+                       (when *current-scene*
+                             (scene-> (current-scene) :update delta-time)
+                             (scene-> (current-scene) :draw))
+                       (when ,update
+                             (funcall ,update delta-time)))))
+          (when ,exiting
+                (funcall ,exiting))))))

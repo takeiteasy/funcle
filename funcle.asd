@@ -4,7 +4,7 @@
   :homepage "https:/github.com/takeiteasy/funcle"
   :license "GPLv3"
   :version "0.0.1"
-  :depends-on (:cl-raylib)
+  :depends-on (#:cl-raylib)
   :serial t
   :pathname "src"
   :components ((:file "package")
